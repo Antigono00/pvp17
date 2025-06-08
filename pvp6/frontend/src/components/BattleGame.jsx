@@ -2680,13 +2680,6 @@ const BattleGame = ({ onClose }) => {
     
     if (Array.isArray(aiAction)) {
       console.log(`AI executing ${aiAction.length} actions`);
-      // FIXED: Dispatch all actions at once to ensure proper state updates
-      dispatch({ 
-        type: ACTIONS.EXECUTE_AI_ACTION_SEQUENCE, 
-        actionSequence: aiAction 
-      });
-      
-      // Then handle animations sequentially
       executeActionSequenceWithAnimation(aiAction, 0);
     } else {
       executeSingleAIActionWithAnimation(aiAction);
