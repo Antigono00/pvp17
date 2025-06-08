@@ -22,7 +22,8 @@ import {
   processEnergyMomentum,
   getActionEfficiency,
   updateChargeEffects,
-  checkFieldSynergies
+  checkFieldSynergies,
+  getMaxHandSize  // ADD THIS IMPORT
 } from '../utils/battleCore';
 import { generateEnemyCreatures, getDifficultySettings, generateEnemyItems } from '../utils/difficultySettings';
 import { processTimedEffect } from '../utils/itemEffects';
@@ -125,6 +126,9 @@ const ACTIONS = {
   
   // FIXED: Add new action for updating all creatures
   UPDATE_ALL_CREATURES: 'UPDATE_ALL_CREATURES',
+  
+  // FIX: Add new action for card drawing
+  DRAW_CARDS_IF_NEEDED: 'DRAW_CARDS_IF_NEEDED',
 };
 
 // FIXED: Calculate energy cost for a creature
@@ -548,6 +552,44 @@ const battleReducer = (state, action) => {
           enemyDeck: state.enemyDeck.slice(1)
         };
       }
+    
+    case ACTIONS.DRAW_CARDS_IF_NEEDED: {
+      let newState = { ...state };
+      
+      // FIXED: Use getMaxHandSize from battleCore
+      const maxHandSize = getMaxHandSize(state.difficulty);
+      
+      // Draw card for player if needed
+      if (newState.playerHand.length < maxHandSize && newState.playerDeck.length > 0) {
+        const drawnCard = newState.playerDeck[0];
+        newState.playerHand = [...newState.playerHand, drawnCard];
+        newState.playerDeck = newState.playerDeck.slice(1);
+        
+        // Add to battle log
+        newState.battleLog = [...newState.battleLog, {
+          id: Date.now() + Math.random(),
+          turn: newState.turn,
+          message: `You drew ${drawnCard.species_name}.`
+        }];
+      }
+      
+      // Draw card for enemy if needed
+      const enemyMaxHandSize = getDifficultySettings(state.difficulty).initialHandSize + 1;
+      if (newState.enemyHand.length < enemyMaxHandSize && newState.enemyDeck.length > 0) {
+        const drawnCard = newState.enemyDeck[0];
+        newState.enemyHand = [...newState.enemyHand, drawnCard];
+        newState.enemyDeck = newState.enemyDeck.slice(1);
+        
+        // Add to battle log
+        newState.battleLog = [...newState.battleLog, {
+          id: Date.now() + Math.random() + 1,
+          turn: newState.turn,
+          message: `Enemy drew a card.`
+        }];
+      }
+      
+      return newState;
+    }
     
     case ACTIONS.CALCULATE_AND_REGENERATE_ENERGY: {
       // FIXED: Calculate energy regeneration based on current state
@@ -1014,25 +1056,40 @@ const battleReducer = (state, action) => {
         
         switch (aiAction.type) {
           case 'deploy':
-            if (sequenceState.enemyField.some(c => c.id === aiAction.creature.id)) {
+            if (Array.from(updatedCreatures.enemy.values()).some(c => c.id === aiAction.creature.id)) {
               console.log("Skipping duplicate deployment");
               continue;
             }
             sequenceState.enemyHand = sequenceState.enemyHand.filter(c => c.id !== aiAction.creature.id);
-            sequenceState.enemyField = [...sequenceState.enemyField, aiAction.creature];
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
+            // FIXED: Also update the map
+            updatedCreatures.enemy.set(aiAction.creature.id, aiAction.creature);
             break;
             
           case 'attack':
             // FIXED: Get the latest version of attacker and target from our map
-            const latestAttacker = updatedCreatures.enemy.get(aiAction.attacker.id) || aiAction.attacker;
-            const latestTarget = updatedCreatures.player.get(aiAction.target.id) || aiAction.target;
+            const latestAttacker = updatedCreatures.enemy.get(aiAction.attacker.id);
+            const latestTarget = updatedCreatures.player.get(aiAction.target.id);
+            
+            // CRITICAL FIX: Ensure we have valid creatures from the map
+            if (!latestAttacker) {
+              console.log(`Skipping attack - attacker ${aiAction.attacker.id} not found in map`);
+              continue;
+            }
+            
+            if (!latestTarget) {
+              console.log(`Skipping attack - target ${aiAction.target.id} not found in map`);
+              continue;
+            }
             
             // Skip if target is already dead
             if (latestTarget.currentHealth <= 0) {
               console.log(`Skipping attack on already defeated ${latestTarget.species_name}`);
               continue;
             }
+            
+            // Log the actual health values being used
+            console.log(`AI Attack: ${latestAttacker.species_name} (${latestAttacker.currentHealth} HP) → ${latestTarget.species_name} (${latestTarget.currentHealth} HP)`);
             
             const attackResult = processAttack(latestAttacker, latestTarget);
             
@@ -1060,9 +1117,12 @@ const battleReducer = (state, action) => {
             
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
             
-            // FIXED: Update the creature maps with the results
+            // FIXED: Update the creature maps with the results IMMEDIATELY
             updatedCreatures.enemy.set(attackResult.updatedAttacker.id, attackResult.updatedAttacker);
             updatedCreatures.player.set(attackResult.updatedDefender.id, attackResult.updatedDefender);
+            
+            // Log the updated health
+            console.log(`After attack: ${attackResult.updatedDefender.species_name} now has ${attackResult.updatedDefender.currentHealth} HP`);
             
             // Track for animations with correct damage
             sequenceState.lastAttack = {
@@ -1071,12 +1131,17 @@ const battleReducer = (state, action) => {
               damage: actualDamage,
               isCritical: attackResult.isCritical || false,
               attackType: attackResult.attackType || 'physical',
-              isBlocked: attackResult.isBlocked || (actualDamage === 0 && aiAction.target.isDefending)
+              isBlocked: attackResult.isBlocked || (actualDamage === 0 && latestTarget.isDefending)
             };
             break;
             
           case 'defend':
-            const latestDefender = updatedCreatures.enemy.get(aiAction.creature.id) || aiAction.creature;
+            const latestDefender = updatedCreatures.enemy.get(aiAction.creature.id);
+            if (!latestDefender) {
+              console.log(`Skipping defend - creature ${aiAction.creature.id} not found in map`);
+              continue;
+            }
+            
             const updatedDefender = defendCreature(latestDefender);
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
             
@@ -1091,7 +1156,7 @@ const battleReducer = (state, action) => {
         }
       }
       
-      // FIXED: Apply all creature updates at once
+      // FIXED: Apply all creature updates at once, filtering out dead creatures
       sequenceState.playerField = Array.from(updatedCreatures.player.values()).filter(c => c.currentHealth > 0);
       sequenceState.enemyField = Array.from(updatedCreatures.enemy.values()).filter(c => c.currentHealth > 0);
       
@@ -2615,6 +2680,13 @@ const BattleGame = ({ onClose }) => {
     
     if (Array.isArray(aiAction)) {
       console.log(`AI executing ${aiAction.length} actions`);
+      // FIXED: Dispatch all actions at once to ensure proper state updates
+      dispatch({ 
+        type: ACTIONS.EXECUTE_AI_ACTION_SEQUENCE, 
+        actionSequence: aiAction 
+      });
+      
+      // Then handle animations sequentially
       executeActionSequenceWithAnimation(aiAction, 0);
     } else {
       executeSingleAIActionWithAnimation(aiAction);
@@ -3009,16 +3081,8 @@ const BattleGame = ({ onClose }) => {
       onComplete: () => {
         dispatch({ type: ACTIONS.SET_ACTIVE_PLAYER, player: 'player' });
         
-        const maxHandSize = 5;
-        if (playerHand.length < maxHandSize && playerDeck.length > 0) {
-          dispatch({ type: ACTIONS.DRAW_CARD, player: 'player' });
-          addToBattleLog(`You drew ${playerDeck[0].species_name}.`);
-        }
-        
-        if (enemyHand.length < getDifficultySettings(difficulty).initialHandSize + 1 && enemyDeck.length > 0) {
-          dispatch({ type: ACTIONS.DRAW_CARD, player: 'enemy' });
-          addToBattleLog(`Enemy drew a card.`);
-        }
+        // FIXED: Dispatch action to draw cards based on current state
+        dispatch({ type: ACTIONS.DRAW_CARDS_IF_NEEDED });
         
         // FIXED: Call regenerateEnergy without parameters
         regenerateEnergy();
@@ -3033,11 +3097,6 @@ const BattleGame = ({ onClose }) => {
     });
     
   }, [
-    playerHand,
-    playerDeck,
-    enemyHand,
-    enemyDeck,
-    difficulty,
     turn,
     consecutiveActions,
     regenerateEnergy,
