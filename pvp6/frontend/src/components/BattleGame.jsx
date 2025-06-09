@@ -144,21 +144,35 @@ const calculateCreatureEnergyCost = (creature) => {
 
 // FIXED: Helper function to process attack with current health values
 const processAttackWithCurrentHealth = (attacker, defender, attackType = 'auto', comboLevel = 0) => {
-  // Make sure we pass the actual current health values
+  // CRITICAL FIX: Instead of deep cloning, create new objects with explicit health values
+  // This avoids any issues with lost properties during cloning
   const attackerWithHealth = {
     ...attacker,
-    currentHealth: attacker.currentHealth
+    id: attacker.id,
+    species_name: attacker.species_name,
+    currentHealth: attacker.currentHealth,
+    battleStats: { ...attacker.battleStats },
+    activeEffects: attacker.activeEffects ? [...attacker.activeEffects] : []
   };
   
   const defenderWithHealth = {
     ...defender,
-    currentHealth: defender.currentHealth
+    id: defender.id,
+    species_name: defender.species_name,
+    currentHealth: defender.currentHealth,
+    battleStats: { ...defender.battleStats },
+    activeEffects: defender.activeEffects ? [...defender.activeEffects] : []
   };
   
   console.log(`processAttackWithCurrentHealth: Attacker ${attackerWithHealth.species_name} (${attackerWithHealth.currentHealth} HP) vs Defender ${defenderWithHealth.species_name} (${defenderWithHealth.currentHealth} HP)`);
   
-  // Call the original processAttack with creatures that have correct health
-  return processAttack(attackerWithHealth, defenderWithHealth, attackType, comboLevel);
+  // Call the original processAttack with our prepared objects
+  const result = processAttack(attackerWithHealth, defenderWithHealth, attackType, comboLevel);
+  
+  // Log the result to verify health changes
+  console.log(`processAttackWithCurrentHealth result: Defender health changed from ${defenderWithHealth.currentHealth} to ${result.updatedDefender.currentHealth}, damage = ${result.damage}`);
+  
+  return result;
 };
 
 // ENHANCED Battle state reducer with team selection and better energy management
@@ -1062,23 +1076,32 @@ const battleReducer = (state, action) => {
       // FIXED: Process all actions at once, then return updated state
       let sequenceState = { ...state };
       
-      // CRITICAL FIX: Initialize Maps with deep clones to ensure proper tracking
-      const updatedCreatures = {
-        player: new Map(state.playerField.map(c => [c.id, JSON.parse(JSON.stringify(c))])),
-        enemy: new Map(state.enemyField.map(c => [c.id, JSON.parse(JSON.stringify(c))]))
+      // CRITICAL FIX: Create detailed logging helper
+      const logMapHealth = (stage, targetId, health) => {
+        console.log(`HEALTH TRACKING [${stage}]: Target ${targetId} health = ${health}`);
       };
       
-      console.log('EXECUTE_AI_ACTION_SEQUENCE: Starting with creatures:', {
-        player: Array.from(updatedCreatures.player.values()).map(c => ({
-          id: c.id,
-          name: c.species_name,
-          health: c.currentHealth
-        })),
-        enemy: Array.from(updatedCreatures.enemy.values()).map(c => ({
-          id: c.id,
-          name: c.species_name,
-          health: c.currentHealth
-        }))
+      // CRITICAL FIX: Initialize Maps with deep clones to ensure proper tracking
+      const updatedCreatures = {
+        player: new Map(),
+        enemy: new Map()
+      };
+      
+      // CRITICAL FIX: Add each creature explicitly to ensure proper cloning
+      state.playerField.forEach(creature => {
+        const deepClone = JSON.parse(JSON.stringify(creature));
+        // Ensure health is correctly preserved
+        deepClone.currentHealth = creature.currentHealth;
+        updatedCreatures.player.set(creature.id, deepClone);
+        logMapHealth('INIT', creature.id, deepClone.currentHealth);
+      });
+      
+      state.enemyField.forEach(creature => {
+        const deepClone = JSON.parse(JSON.stringify(creature));
+        // Ensure health is correctly preserved
+        deepClone.currentHealth = creature.currentHealth;
+        updatedCreatures.enemy.set(creature.id, deepClone);
+        logMapHealth('INIT', creature.id, deepClone.currentHealth);
       });
       
       for (const aiAction of action.actionSequence) {
@@ -1096,12 +1119,15 @@ const battleReducer = (state, action) => {
             }
             sequenceState.enemyHand = sequenceState.enemyHand.filter(c => c.id !== aiAction.creature.id);
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
-            // Update the map with deep clone
-            updatedCreatures.enemy.set(aiAction.creature.id, JSON.parse(JSON.stringify(aiAction.creature)));
+            
+            // Deep clone and preserve health
+            const deepClonedCreature = JSON.parse(JSON.stringify(aiAction.creature));
+            deepClonedCreature.currentHealth = aiAction.creature.currentHealth;
+            updatedCreatures.enemy.set(aiAction.creature.id, deepClonedCreature);
             break;
             
           case 'attack':
-            // Get the latest version of attacker and target from our map
+            // CRITICAL FIX: Get the latest version of attacker and target from our map
             const latestAttacker = updatedCreatures.enemy.get(aiAction.attacker.id);
             const latestTarget = updatedCreatures.player.get(aiAction.target.id);
             
@@ -1122,12 +1148,30 @@ const battleReducer = (state, action) => {
               continue;
             }
             
-            // Log the actual health values being used
-            console.log(`AI Attack: ${latestAttacker.species_name} (${latestAttacker.currentHealth} HP) → ${latestTarget.species_name} (${latestTarget.currentHealth} HP)`);
+            // CRITICAL LOGGING: Log health before attack
+            console.log(`ATTACK SEQUENCE: ${latestAttacker.species_name} (${latestAttacker.currentHealth} HP) → ${latestTarget.species_name} (${latestTarget.currentHealth} HP)`);
+            logMapHealth('BEFORE ATTACK', latestTarget.id, latestTarget.currentHealth);
             
-            // CRITICAL FIX: Use processAttackWithCurrentHealth to ensure proper health tracking
+            // CRITICAL FIX: Create explicit copies to ensure health is preserved
+            const attackerForProcess = {
+              ...latestAttacker,
+              currentHealth: latestAttacker.currentHealth,
+              battleStats: { ...latestAttacker.battleStats }
+            };
+            
+            const targetForProcess = {
+              ...latestTarget,
+              currentHealth: latestTarget.currentHealth,
+              battleStats: { ...latestTarget.battleStats }
+            };
+            
+            // Use the processAttack directly with our prepared copies
             const comboLevel = sequenceState.consecutiveActions.enemy;
-            const attackResult = processAttackWithCurrentHealth(latestAttacker, latestTarget, 'auto', comboLevel);
+            const attackType = attackerForProcess.battleStats.physicalAttack > attackerForProcess.battleStats.magicalAttack ? 'physical' : 'magical';
+            const attackResult = processAttack(attackerForProcess, targetForProcess, attackType, comboLevel);
+            
+            // Log what happened in the attack
+            console.log(`Attack result: ${targetForProcess.species_name} health before=${targetForProcess.currentHealth}, after process=${attackResult.updatedDefender.currentHealth}`);
             
             // Extract damage from attackResult
             let actualDamage = attackResult.damage ?? 
@@ -1137,9 +1181,9 @@ const battleReducer = (state, action) => {
                                 null;
             
             // If no damage property found, calculate it from health difference
-            if (actualDamage === null && attackResult.updatedDefender && latestTarget) {
-              const healthBefore = latestTarget.currentHealth || 0;
-              const healthAfter = attackResult.updatedDefender.currentHealth || 0;
+            if (actualDamage === null && attackResult.updatedDefender) {
+              const healthBefore = targetForProcess.currentHealth;
+              const healthAfter = attackResult.updatedDefender.currentHealth;
               actualDamage = Math.max(0, healthBefore - healthAfter);
               console.log('EXECUTE_AI_ACTION_SEQUENCE: Calculated damage from health difference:', healthBefore, '-', healthAfter, '=', actualDamage);
             }
@@ -1149,35 +1193,39 @@ const battleReducer = (state, action) => {
               actualDamage = 0;
             }
             
-            console.log('EXECUTE_AI_ACTION_SEQUENCE: Attack damage extracted:', actualDamage);
-            
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
             sequenceState.consecutiveActions.enemy += 1;
             sequenceState.energyMomentum.enemy += aiAction.energyCost;
             
-            // CRITICAL FIX: Update the Maps with deep clones that have the correct health
-            const updatedAttackerClone = JSON.parse(JSON.stringify(attackResult.updatedAttacker));
-            const updatedDefenderClone = JSON.parse(JSON.stringify(attackResult.updatedDefender));
+            // CRITICAL FIX: Update the Maps with updated creatures that have the correct health
+            // Don't deep clone here, just update the existing Map entries with the results
             
-            // Ensure the health values are correct
-            updatedAttackerClone.currentHealth = attackResult.updatedAttacker.currentHealth;
-            updatedDefenderClone.currentHealth = attackResult.updatedDefender.currentHealth;
+            // Get the updated creatures from the attack result
+            const updatedAttacker = attackResult.updatedAttacker;
+            const updatedDefender = attackResult.updatedDefender;
             
-            // Log the health values before updating the Map
-            console.log(`Health values before updating Map: 
-              Attacker (${updatedAttackerClone.id}): ${updatedAttackerClone.currentHealth} HP, 
-              Defender (${updatedDefenderClone.id}): ${updatedDefenderClone.currentHealth} HP`);
+            // Log health values before Map update
+            console.log(`Before Map update: ${updatedDefender.species_name} health = ${updatedDefender.currentHealth}`);
             
-            updatedCreatures.enemy.set(updatedAttackerClone.id, updatedAttackerClone);
-            updatedCreatures.player.set(updatedDefenderClone.id, updatedDefenderClone);
+            // CRITICAL: Create new objects to ensure no reference issues
+            const newAttacker = {
+              ...updatedAttacker,
+              currentHealth: updatedAttacker.currentHealth
+            };
             
-            // Verify the Map was updated correctly
-            console.log(`Map health values after update: 
-              Attacker (${updatedAttackerClone.id}): ${updatedCreatures.enemy.get(updatedAttackerClone.id).currentHealth} HP, 
-              Defender (${updatedDefenderClone.id}): ${updatedCreatures.player.get(updatedDefenderClone.id).currentHealth} HP`);
+            const newDefender = {
+              ...updatedDefender,
+              currentHealth: updatedDefender.currentHealth
+            };
             
-            // Log the updated health
-            console.log(`After attack: ${updatedDefenderClone.species_name} now has ${updatedDefenderClone.currentHealth} HP`);
+            // Update the map with the new objects
+            updatedCreatures.enemy.set(newAttacker.id, newAttacker);
+            updatedCreatures.player.set(newDefender.id, newDefender);
+            
+            // CRITICAL VALIDATION: Log health after Map update to verify it was updated correctly
+            const verifyDefender = updatedCreatures.player.get(newDefender.id);
+            console.log(`After Map update: ${verifyDefender.species_name} health = ${verifyDefender.currentHealth}`);
+            logMapHealth('AFTER ATTACK', newDefender.id, verifyDefender.currentHealth);
             
             // Track for animations with correct damage
             sequenceState.lastAttack = {
@@ -1185,8 +1233,8 @@ const battleReducer = (state, action) => {
               targetId: aiAction.target.id,
               damage: actualDamage,
               isCritical: attackResult.isCritical || false,
-              attackType: attackResult.attackType || 'physical',
-              isBlocked: attackResult.isBlocked || (actualDamage === 0 && latestTarget.isDefending),
+              attackType: attackType,
+              isBlocked: attackResult.isBlocked || false,
               damageType: attackResult.damageResult?.damageType || 'normal'
             };
             break;
@@ -1198,12 +1246,18 @@ const battleReducer = (state, action) => {
               continue;
             }
             
-            const updatedDefender = defendCreature(latestDefender, state.difficulty);
+            const defendedCreature = defendCreature(latestDefender, state.difficulty);
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
             sequenceState.consecutiveActions.enemy += 1;
             
-            // Update the creature map with deep clone
-            updatedCreatures.enemy.set(updatedDefender.id, JSON.parse(JSON.stringify(updatedDefender)));
+            // CRITICAL FIX: Create new object to avoid reference issues
+            const newDefendingCreature = {
+              ...defendedCreature,
+              currentHealth: defendedCreature.currentHealth
+            };
+            
+            // Update the map with the new object
+            updatedCreatures.enemy.set(newDefendingCreature.id, newDefendingCreature);
             
             // Track for animations
             sequenceState.lastDefend = {
@@ -1213,29 +1267,26 @@ const battleReducer = (state, action) => {
         }
       }
       
-      // Apply all creature updates at once, filtering out dead creatures
-      sequenceState.playerField = Array.from(updatedCreatures.player.values()).filter(c => c.currentHealth > 0);
-      sequenceState.enemyField = Array.from(updatedCreatures.enemy.values()).filter(c => c.currentHealth > 0);
+      // FINAL STATE VERIFICATION: Log final health values of all creatures
+      console.log("FINAL HEALTH VALUES:");
+      updatedCreatures.player.forEach((creature, id) => {
+        console.log(`Player ${creature.species_name} (${id}): ${creature.currentHealth} HP`);
+      });
+      updatedCreatures.enemy.forEach((creature, id) => {
+        console.log(`Enemy ${creature.species_name} (${id}): ${creature.currentHealth} HP`);
+      });
       
-      // Reapply synergies after all actions
+      // Apply all creature updates at once, filtering out dead creatures
+      sequenceState.playerField = Array.from(updatedCreatures.player.values())
+        .filter(c => c.currentHealth > 0);
+      sequenceState.enemyField = Array.from(updatedCreatures.enemy.values())
+        .filter(c => c.currentHealth > 0);
+      
+      // Apply synergies after all actions
       const finalPlayerSynergies = checkFieldSynergies(sequenceState.playerField);
-      const finalEnemySynergies = checkFieldSynergies(sequenceState.enemyField);
       sequenceState.playerField = applyFieldSynergies(sequenceState.playerField);
       sequenceState.enemyField = applyFieldSynergies(sequenceState.enemyField);
       sequenceState.activeSynergies = finalPlayerSynergies;
-      
-      console.log('EXECUTE_AI_ACTION_SEQUENCE: Final state:', {
-        player: sequenceState.playerField.map(c => ({
-          id: c.id,
-          name: c.species_name,
-          health: c.currentHealth
-        })),
-        enemy: sequenceState.enemyField.map(c => ({
-          id: c.id,
-          name: c.species_name,
-          health: c.currentHealth
-        }))
-      });
       
       return sequenceState;
     
