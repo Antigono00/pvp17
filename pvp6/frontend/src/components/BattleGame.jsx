@@ -1,4 +1,4 @@
-// src/components/BattleGame.jsx - ENHANCED VERSION WITH TEAM SELECTION - FIXED ENERGY REGENERATION
+// src/components/BattleGame.jsx - ENHANCED VERSION WITH TEAM SELECTION - FIXED ENERGY REGENERATION AND AI ATTACK SEQUENCE
 import React, { useState, useEffect, useContext, useCallback, useReducer, useRef } from 'react';
 import { GameContext } from '../context/GameContext';
 import { useRadixConnect } from '../context/RadixConnectContext';
@@ -140,6 +140,25 @@ const calculateCreatureEnergyCost = (creature) => {
   }
   
   return energyCost;
+};
+
+// FIXED: Helper function to process attack with current health values
+const processAttackWithCurrentHealth = (attacker, defender, attackType = 'auto', comboLevel = 0) => {
+  // Make sure we pass the actual current health values
+  const attackerWithHealth = {
+    ...attacker,
+    currentHealth: attacker.currentHealth
+  };
+  
+  const defenderWithHealth = {
+    ...defender,
+    currentHealth: defender.currentHealth
+  };
+  
+  console.log(`processAttackWithCurrentHealth: Attacker ${attackerWithHealth.species_name} (${attackerWithHealth.currentHealth} HP) vs Defender ${defenderWithHealth.species_name} (${defenderWithHealth.currentHealth} HP)`);
+  
+  // Call the original processAttack with creatures that have correct health
+  return processAttack(attackerWithHealth, defenderWithHealth, attackType, comboLevel);
 };
 
 // ENHANCED Battle state reducer with team selection and better energy management
@@ -1042,10 +1061,25 @@ const battleReducer = (state, action) => {
     case ACTIONS.EXECUTE_AI_ACTION_SEQUENCE:
       // FIXED: Process all actions at once, then return updated state
       let sequenceState = { ...state };
+      
+      // CRITICAL FIX: Initialize Maps with deep clones to ensure proper tracking
       const updatedCreatures = {
-        player: new Map(state.playerField.map(c => [c.id, { ...c }])),
-        enemy: new Map(state.enemyField.map(c => [c.id, { ...c }]))
+        player: new Map(state.playerField.map(c => [c.id, JSON.parse(JSON.stringify(c))])),
+        enemy: new Map(state.enemyField.map(c => [c.id, JSON.parse(JSON.stringify(c))]))
       };
+      
+      console.log('EXECUTE_AI_ACTION_SEQUENCE: Starting with creatures:', {
+        player: Array.from(updatedCreatures.player.values()).map(c => ({
+          id: c.id,
+          name: c.species_name,
+          health: c.currentHealth
+        })),
+        enemy: Array.from(updatedCreatures.enemy.values()).map(c => ({
+          id: c.id,
+          name: c.species_name,
+          health: c.currentHealth
+        }))
+      });
       
       for (const aiAction of action.actionSequence) {
         const actionCost = aiAction.energyCost || 0;
@@ -1062,16 +1096,16 @@ const battleReducer = (state, action) => {
             }
             sequenceState.enemyHand = sequenceState.enemyHand.filter(c => c.id !== aiAction.creature.id);
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
-            // FIXED: Also update the map
-            updatedCreatures.enemy.set(aiAction.creature.id, aiAction.creature);
+            // Update the map with deep clone
+            updatedCreatures.enemy.set(aiAction.creature.id, JSON.parse(JSON.stringify(aiAction.creature)));
             break;
             
           case 'attack':
-            // FIXED: Get the latest version of attacker and target from our map
+            // Get the latest version of attacker and target from our map
             const latestAttacker = updatedCreatures.enemy.get(aiAction.attacker.id);
             const latestTarget = updatedCreatures.player.get(aiAction.target.id);
             
-            // CRITICAL FIX: Ensure we have valid creatures from the map
+            // Ensure we have valid creatures from the map
             if (!latestAttacker) {
               console.log(`Skipping attack - attacker ${aiAction.attacker.id} not found in map`);
               continue;
@@ -1091,9 +1125,11 @@ const battleReducer = (state, action) => {
             // Log the actual health values being used
             console.log(`AI Attack: ${latestAttacker.species_name} (${latestAttacker.currentHealth} HP) → ${latestTarget.species_name} (${latestTarget.currentHealth} HP)`);
             
-            const attackResult = processAttack(latestAttacker, latestTarget);
+            // CRITICAL FIX: Use processAttackWithCurrentHealth to ensure proper health tracking
+            const comboLevel = sequenceState.consecutiveActions.enemy;
+            const attackResult = processAttackWithCurrentHealth(latestAttacker, latestTarget, 'auto', comboLevel);
             
-            // Extract damage from attackResult with multiple fallbacks
+            // Extract damage from attackResult
             let actualDamage = attackResult.damage ?? 
                                 attackResult.finalDamage ?? 
                                 attackResult.totalDamage ??
@@ -1116,13 +1152,22 @@ const battleReducer = (state, action) => {
             console.log('EXECUTE_AI_ACTION_SEQUENCE: Attack damage extracted:', actualDamage);
             
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
+            sequenceState.consecutiveActions.enemy += 1;
+            sequenceState.energyMomentum.enemy += aiAction.energyCost;
             
-            // FIXED: Update the creature maps with the results IMMEDIATELY
-            updatedCreatures.enemy.set(attackResult.updatedAttacker.id, attackResult.updatedAttacker);
-            updatedCreatures.player.set(attackResult.updatedDefender.id, attackResult.updatedDefender);
+            // CRITICAL FIX: Update the Maps with deep clones that have the correct health
+            const updatedAttackerClone = JSON.parse(JSON.stringify(attackResult.updatedAttacker));
+            const updatedDefenderClone = JSON.parse(JSON.stringify(attackResult.updatedDefender));
+            
+            // Ensure the health values are correct
+            updatedAttackerClone.currentHealth = attackResult.updatedAttacker.currentHealth;
+            updatedDefenderClone.currentHealth = attackResult.updatedDefender.currentHealth;
+            
+            updatedCreatures.enemy.set(updatedAttackerClone.id, updatedAttackerClone);
+            updatedCreatures.player.set(updatedDefenderClone.id, updatedDefenderClone);
             
             // Log the updated health
-            console.log(`After attack: ${attackResult.updatedDefender.species_name} now has ${attackResult.updatedDefender.currentHealth} HP`);
+            console.log(`After attack: ${updatedDefenderClone.species_name} now has ${updatedDefenderClone.currentHealth} HP`);
             
             // Track for animations with correct damage
             sequenceState.lastAttack = {
@@ -1142,11 +1187,12 @@ const battleReducer = (state, action) => {
               continue;
             }
             
-            const updatedDefender = defendCreature(latestDefender);
+            const updatedDefender = defendCreature(latestDefender, state.difficulty);
             sequenceState.enemyEnergy = Math.max(0, sequenceState.enemyEnergy - aiAction.energyCost);
+            sequenceState.consecutiveActions.enemy += 1;
             
-            // Update the creature map
-            updatedCreatures.enemy.set(updatedDefender.id, updatedDefender);
+            // Update the creature map with deep clone
+            updatedCreatures.enemy.set(updatedDefender.id, JSON.parse(JSON.stringify(updatedDefender)));
             
             // Track for animations
             sequenceState.lastDefend = {
@@ -1156,9 +1202,29 @@ const battleReducer = (state, action) => {
         }
       }
       
-      // FIXED: Apply all creature updates at once, filtering out dead creatures
+      // Apply all creature updates at once, filtering out dead creatures
       sequenceState.playerField = Array.from(updatedCreatures.player.values()).filter(c => c.currentHealth > 0);
       sequenceState.enemyField = Array.from(updatedCreatures.enemy.values()).filter(c => c.currentHealth > 0);
+      
+      // Reapply synergies after all actions
+      const finalPlayerSynergies = checkFieldSynergies(sequenceState.playerField);
+      const finalEnemySynergies = checkFieldSynergies(sequenceState.enemyField);
+      sequenceState.playerField = applyFieldSynergies(sequenceState.playerField);
+      sequenceState.enemyField = applyFieldSynergies(sequenceState.enemyField);
+      sequenceState.activeSynergies = finalPlayerSynergies;
+      
+      console.log('EXECUTE_AI_ACTION_SEQUENCE: Final state:', {
+        player: sequenceState.playerField.map(c => ({
+          id: c.id,
+          name: c.species_name,
+          health: c.currentHealth
+        })),
+        enemy: sequenceState.enemyField.map(c => ({
+          id: c.id,
+          name: c.species_name,
+          health: c.currentHealth
+        }))
+      });
       
       return sequenceState;
     
@@ -1291,9 +1357,7 @@ const BattleGame = ({ onClose }) => {
     activeSynergies: [],
     energyMomentumDetails: { player: null, enemy: null },
     currentAIStrategy: null,
-    
-    // FIXED: Add lastRegenAmounts
-    lastRegenAmounts: null,
+    lastRegenAmounts: null, // FIXED: Initialize lastRegenAmounts
   });
   
   // Update ref when enemyEnergy changes
@@ -3049,6 +3113,51 @@ const BattleGame = ({ onClose }) => {
   const finishEnemyTurn = useCallback(() => {
     console.log("Finishing enemy turn...");
     
+    // FIXED: Execute all queued AI actions in sequence using the new reducer action
+    const aiActions = determineAIAction(
+      difficulty,
+      enemyHand,
+      enemyField,
+      playerField,
+      enemyTools,
+      enemySpells,
+      currentEnemyEnergyRef.current,
+      {
+        turn: turn,
+        playerFieldCount: playerField.length,
+        enemyFieldCount: enemyField.length,
+        playerHandCount: playerHand.length,
+        enemyHandCount: enemyHand.length,
+        playerTotalHealth: playerField.reduce((sum, c) => sum + c.currentHealth, 0),
+        enemyTotalHealth: enemyField.reduce((sum, c) => sum + c.currentHealth, 0),
+        consecutiveActions: consecutiveActions,
+        energyMomentum: energyMomentum
+      }
+    );
+    
+    // If AI returned multiple actions, dispatch them all at once
+    if (Array.isArray(aiActions) && aiActions.length > 0) {
+      dispatch({
+        type: ACTIONS.EXECUTE_AI_ACTION_SEQUENCE,
+        actionSequence: aiActions
+      });
+      
+      // Add battle log messages for each action
+      aiActions.forEach(action => {
+        switch (action.type) {
+          case 'attack':
+            addToBattleLog(`Enemy ${action.attacker.species_name} attacked ${action.target.species_name}!`);
+            break;
+          case 'deploy':
+            addToBattleLog(`Enemy deployed ${action.creature.species_name}!`);
+            break;
+          case 'defend':
+            addToBattleLog(`Enemy ${action.creature.species_name} took a defensive stance!`);
+            break;
+        }
+      });
+    }
+    
     applyEnergyDecay();
     
     dispatch({ type: ACTIONS.INCREMENT_TURN });
@@ -3095,7 +3204,15 @@ const BattleGame = ({ onClose }) => {
     regenerateEnergy,
     applyEnergyDecay,
     addToBattleLog,
-    queueAnimation
+    queueAnimation,
+    difficulty,
+    enemyHand,
+    enemyField,
+    playerField,
+    enemyTools,
+    enemySpells,
+    playerHand,
+    energyMomentum
   ]);
   
   const processEnemyTurn = useCallback(() => {
