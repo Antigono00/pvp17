@@ -1163,8 +1163,18 @@ const battleReducer = (state, action) => {
             updatedAttackerClone.currentHealth = attackResult.updatedAttacker.currentHealth;
             updatedDefenderClone.currentHealth = attackResult.updatedDefender.currentHealth;
             
+            // Log the health values before updating the Map
+            console.log(`Health values before updating Map: 
+              Attacker (${updatedAttackerClone.id}): ${updatedAttackerClone.currentHealth} HP, 
+              Defender (${updatedDefenderClone.id}): ${updatedDefenderClone.currentHealth} HP`);
+            
             updatedCreatures.enemy.set(updatedAttackerClone.id, updatedAttackerClone);
             updatedCreatures.player.set(updatedDefenderClone.id, updatedDefenderClone);
+            
+            // Verify the Map was updated correctly
+            console.log(`Map health values after update: 
+              Attacker (${updatedAttackerClone.id}): ${updatedCreatures.enemy.get(updatedAttackerClone.id).currentHealth} HP, 
+              Defender (${updatedDefenderClone.id}): ${updatedCreatures.player.get(updatedDefenderClone.id).currentHealth} HP`);
             
             // Log the updated health
             console.log(`After attack: ${updatedDefenderClone.species_name} now has ${updatedDefenderClone.currentHealth} HP`);
@@ -1176,7 +1186,8 @@ const battleReducer = (state, action) => {
               damage: actualDamage,
               isCritical: attackResult.isCritical || false,
               attackType: attackResult.attackType || 'physical',
-              isBlocked: attackResult.isBlocked || (actualDamage === 0 && latestTarget.isDefending)
+              isBlocked: attackResult.isBlocked || (actualDamage === 0 && latestTarget.isDefending),
+              damageType: attackResult.damageResult?.damageType || 'normal'
             };
             break;
             
