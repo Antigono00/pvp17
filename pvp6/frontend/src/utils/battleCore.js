@@ -453,7 +453,7 @@ const processDefeatedCreatures = (creatures, opposingCreatures = []) => {
   return survivingCreatures;
 };
 
-// ENHANCED: Process attack action with combo bonus
+// ENHANCED: Process attack action with combo bonus and proper health tracking
 export const processAttack = (attacker, defender, attackType = 'auto', comboLevel = 0) => {
   // Validate input
   if (!attacker || !defender || !attacker.battleStats || !defender.battleStats) {
@@ -465,9 +465,15 @@ export const processAttack = (attacker, defender, attackType = 'auto', comboLeve
     };
   }
   
-  // Clone creatures to avoid mutating original objects
+  // CRITICAL FIX: Clone creatures properly to preserve current health
   const attackerClone = JSON.parse(JSON.stringify(attacker));
   const defenderClone = JSON.parse(JSON.stringify(defender));
+  
+  // CRITICAL FIX: Ensure current health is maintained
+  attackerClone.currentHealth = attacker.currentHealth;
+  defenderClone.currentHealth = defender.currentHealth;
+  
+  console.log(`processAttack: ${attackerClone.species_name} (${attackerClone.currentHealth} HP) attacking ${defenderClone.species_name} (${defenderClone.currentHealth} HP)`);
   
   // Determine attack type if set to auto
   if (attackType === 'auto') {
@@ -496,8 +502,16 @@ export const processAttack = (attacker, defender, attackType = 'auto', comboLeve
   
   // Apply damage with additional effects
   if (!damageResult.isDodged) {
+    // Store defender's health before damage
+    const previousHealth = defenderClone.currentHealth;
+    
     // Base damage
     defenderClone.currentHealth = Math.max(0, defenderClone.currentHealth - damageResult.damage);
+    
+    // Calculate actual damage dealt
+    const actualDamage = previousHealth - defenderClone.currentHealth;
+    
+    console.log(`processAttack result: ${actualDamage} damage dealt. ${defenderClone.species_name} health: ${previousHealth} → ${defenderClone.currentHealth}`);
     
     // Critical hit effects (reduced impact)
     if (damageResult.isCritical) {
@@ -542,6 +556,10 @@ export const processAttack = (attacker, defender, attackType = 'auto', comboLeve
         defenderClone.activeEffects = [...(defenderClone.activeEffects || []), statusEffect];
       }
     }
+    
+    // CRITICAL FIX: Update damage result with actual damage
+    damageResult.damage = actualDamage;
+    damageResult.actualDamage = actualDamage;
   }
   
   // Create detailed battle log entry
@@ -586,13 +604,23 @@ export const processAttack = (attacker, defender, attackType = 'auto', comboLeve
     }
   }
   
+  // CRITICAL FIX: Return the complete attack result with all damage properties
   return {
     updatedAttacker: attackerClone,
     updatedDefender: defenderClone,
     battleLog: logMessage,
+    damage: damageResult.damage || 0,           // Primary damage property
+    finalDamage: damageResult.damage || 0,      // Alternate damage property
+    totalDamage: damageResult.damage || 0,      // Another alternate
+    damageDealt: damageResult.damage || 0,      // Yet another alternate
+    actualDamage: damageResult.damage || 0,     // And another
+    isCritical: damageResult.isCritical || false,
+    attackType: attackType,
+    isBlocked: damageResult.isDodged || false,
     damageResult: {
       ...damageResult,
-      comboMultiplier: comboMultiplier
+      comboMultiplier: comboMultiplier,
+      damage: damageResult.damage || 0
     }
   };
 };
